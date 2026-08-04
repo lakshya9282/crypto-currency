@@ -1,13 +1,13 @@
 # live_crypto_dashboard_full.py
 # ================================================
-# LIVE MULTI-CRYPTO DASHBOARD WITH ML PREDICTIONS (BINANCE EDITION)
+# LIVE MULTI-CRYPTO DASHBOARD WITH ML PREDICTIONS (YAHOO FINANCE EDITION)
 # - Volume-based features
-# - Top 5 gainers / losers (24h)
+# - Top gainers / losers (24h) from tracked list
 # - Download buttons for predictions & raw data
 # ================================================
 
 import streamlit as st
-import requests
+import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -15,32 +15,31 @@ from sklearn.preprocessing import StandardScaler
 import plotly.graph_objs as go
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
-import time
 
 st.set_page_config(page_title="Live Crypto Dashboard", layout="wide")
 st.title("Live Multi-Crypto Dashboard with ML Predictions")
-st.markdown("Real-time cryptocurrency prices with next-day trend & price predictions. Powered by **Binance API** for fast, reliable data.")
+st.markdown("Real-time cryptocurrency prices with next-day trend & price predictions. Powered by **Yahoo Finance** for unrestricted, fast data.")
 
 # ---- AUTO REFRESH EVERY HOUR ----
 st_autorefresh(interval=3600000, key="crypto_refresh")
 
-# ---- SYMBOL DICTIONARY (Binance Tickers) ----
+# ---- SYMBOL DICTIONARY (Yahoo Finance Tickers) ----
 coins_dict = {
-    "Bitcoin (BTC)": "BTCUSDT",
-    "Ethereum (ETH)": "ETHUSDT",
-    "Dogecoin (DOGE)": "DOGEUSDT",
-    "Solana (SOL)": "SOLUSDT",
-    "Cardano (ADA)": "ADAUSDT",
-    "Litecoin (LTC)": "LTCUSDT",
-    "Binance Coin (BNB)": "BNBUSDT",
-    "Ripple (XRP)": "XRPUSDT",
-    "Polkadot (DOT)": "DOTUSDT",
-    "Avalanche (AVAX)": "AVAXUSDT",
-    "Shiba Inu (SHIB)": "SHIBUSDT",
-    "Tron (TRX)": "TRXUSDT",
-    "Chainlink (LINK)": "LINKUSDT",
-    "Polygon (MATIC)": "MATICUSDT",
-    "Stellar (XLM)": "XLMUSDT"
+    "Bitcoin (BTC)": "BTC-USD",
+    "Ethereum (ETH)": "ETH-USD",
+    "Dogecoin (DOGE)": "DOGE-USD",
+    "Solana (SOL)": "SOL-USD",
+    "Cardano (ADA)": "ADA-USD",
+    "Litecoin (LTC)": "LTC-USD",
+    "Binance Coin (BNB)": "BNB-USD",
+    "Ripple (XRP)": "XRP-USD",
+    "Polkadot (DOT)": "DOT-USD",
+    "Avalanche (AVAX)": "AVAX-USD",
+    "Shiba Inu (SHIB)": "SHIB-USD",
+    "Tron (TRX)": "TRX-USD",
+    "Chainlink (LINK)": "LINK-USD",
+    "Polygon (MATIC)": "MATIC-USD",
+    "Stellar (XLM)": "XLM-USD"
 }
 
 reverse_coins_dict = {v: k for k, v in coins_dict.items()}
@@ -49,56 +48,60 @@ reverse_coins_dict = {v: k for k, v in coins_dict.items()}
 if "selected_coins" not in st.session_state:
     st.session_state.selected_coins = ["Bitcoin (BTC)", "Ethereum (ETH)"]
 
-# ---- TOP GAINERS / LOSERS SECTION (BINANCE) ----
+# ---- TOP GAINERS / LOSERS SECTION (YAHOO FINANCE) ----
 st.markdown("##  Top 5 Gainers & Top 5 Losers (24h)")
+st.caption("Calculated from your tracked portfolio list below.")
 
 @st.cache_data(ttl=300) # Cache for 5 minutes
-def fetch_binance_markets():
-    url = "https://api.binance.com/api/v3/ticker/24hr"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        
-        # Filter only for the USDT pairs we track in our dictionary to avoid obscure coins
-        tracked_symbols = list(coins_dict.values())
-        filtered_data = [item for item in data if item['symbol'] in tracked_symbols]
-        
-        df = pd.DataFrame(filtered_data)
-        df["priceChangePercent"] = pd.to_numeric(df["priceChangePercent"])
-        df["lastPrice"] = pd.to_numeric(df["lastPrice"])
-        df["volume"] = pd.to_numeric(df["volume"])
-        return df
-    except Exception as e:
-        st.error(f"Error fetching Binance markets: {e}")
-        return pd.DataFrame()
+def fetch_market_movers():
+    market_data = []
+    # Fetch recent data for our tracked coins to find gainers/losers
+    for name, ticker in coins_dict.items():
+        try:
+            tkr = yf.Ticker(ticker)
+            hist = tkr.history(period="5d") # Get enough days to ensure we have the last 2 closes
+            if len(hist) >= 2:
+                prev_close = float(hist['Close'].iloc[-2])
+                curr_close = float(hist['Close'].iloc[-1])
+                volume = float(hist['Volume'].iloc[-1])
+                pct_change = ((curr_close - prev_close) / prev_close) * 100
+                
+                market_data.append({
+                    "name": name,
+                    "symbol": ticker,
+                    "current_price": curr_close,
+                    "price_change_percentage_24h": pct_change,
+                    "total_volume": volume
+                })
+        except Exception:
+            continue
+    return pd.DataFrame(market_data)
 
-df_markets = fetch_binance_markets()
+df_markets = fetch_market_movers()
 
 if not df_markets.empty:
-    sorted_by_change = df_markets.sort_values(by="priceChangePercent", ascending=False)
+    sorted_by_change = df_markets.sort_values(by="price_change_percentage_24h", ascending=False)
     top_gainers = sorted_by_change.head(5)
-    top_losers = sorted_by_change.tail(5).sort_values(by="priceChangePercent")
+    top_losers = sorted_by_change.tail(5).sort_values(by="price_change_percentage_24h")
 else:
     top_gainers = pd.DataFrame()
     top_losers = pd.DataFrame()
 
 def format_market_table(df):
     if df.empty: return df
-    display_df = df[["symbol", "lastPrice", "priceChangePercent", "volume"]].copy()
-    display_df["Name"] = display_df["symbol"].map(reverse_coins_dict)
-    display_df = display_df[["Name", "symbol", "lastPrice", "priceChangePercent", "volume"]]
+    display_df = df[["name", "symbol", "current_price", "price_change_percentage_24h", "total_volume"]].copy()
     display_df.rename(columns={
+        "name": "Name",
         "symbol": "Symbol", 
-        "lastPrice": "Price (USD)",
-        "priceChangePercent": "24h %", 
-        "volume": "24h Volume"
+        "current_price": "Price (USD)",
+        "price_change_percentage_24h": "24h %", 
+        "total_volume": "24h Volume"
     }, inplace=True)
     return display_df.reset_index(drop=True)
 
 col1, col2, col3 = st.columns([3, 1, 3])
 with col1:
-    st.subheader("Top 5 Gainers (24h)")
+    st.subheader("Top 5 Gainers")
     if not top_gainers.empty:
         st.table(format_market_table(top_gainers))
     else:
@@ -107,14 +110,14 @@ with col1:
 with col2:
     st.write("") 
     if st.button(" Add Gainers"):
-        st.session_state.selected_coins = [reverse_coins_dict[sym] for sym in top_gainers["symbol"].tolist()]
+        st.session_state.selected_coins = top_gainers["name"].tolist()
         st.experimental_rerun()
     if st.button(" Add Losers"):
-        st.session_state.selected_coins = [reverse_coins_dict[sym] for sym in top_losers["symbol"].tolist()]
+        st.session_state.selected_coins = top_losers["name"].tolist()
         st.experimental_rerun()
 
 with col3:
-    st.subheader("Top 5 Losers (24h)")
+    st.subheader("Top 5 Losers")
     if not top_losers.empty:
         st.table(format_market_table(top_losers))
     else:
@@ -133,47 +136,45 @@ if not selected_coins:
     st.warning("Please select at least one cryptocurrency to proceed.")
     st.stop()
 
-# ---- FETCH HISTORICAL DATA (BINANCE KLINES) ----
+# ---- FETCH HISTORICAL DATA (YAHOO FINANCE) ----
 @st.cache_data(ttl=3600)
-def fetch_binance_history(symbol: str, days: int):
-    # Binance klines endpoint
-    url = "https://api.binance.com/api/v3/klines"
-    params = {
-        "symbol": symbol,
-        "interval": "1d",
-        "limit": days
-    }
+def fetch_yf_history(ticker: str, days: int):
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        tkr = yf.Ticker(ticker)
+        # Calculate dynamic date range based on user input
+        end_date = datetime.now()
+        start_date = end_date - pd.Timedelta(days=days)
         
-        # Binance kline format: [Open time, Open, High, Low, Close, Volume, Close time, ...]
-        if not data:
+        df = tkr.history(start=start_date, end=end_date)
+        
+        if df.empty:
             return pd.DataFrame(columns=["Date", "Price", "Volume"])
             
-        df = pd.DataFrame(data, columns=["Date", "Open", "High", "Low", "Price", "Volume", "CloseTime", "QAV", "NumTrades", "TBAV", "TQAV", "Ignore"])
-        df["Date"] = pd.to_datetime(df["Date"], unit="ms")
-        df["Price"] = pd.to_numeric(df["Price"])
-        df["Volume"] = pd.to_numeric(df["Volume"])
+        df = df.reset_index()
+        # Handle cases where YF returns 'Datetime' vs 'Date'
+        date_col = 'Date' if 'Date' in df.columns else 'Datetime'
         
-        return df[["Date", "Price", "Volume"]].reset_index(drop=True)
+        # Clean dataframe for our ML model
+        df_clean = pd.DataFrame({
+            "Date": pd.to_datetime(df[date_col]).dt.tz_localize(None),
+            "Price": df["Close"],
+            "Volume": df["Volume"]
+        })
+        return df_clean
     except Exception as e:
-        st.error(f"Failed to fetch history for {symbol}: {e}")
         return pd.DataFrame(columns=["Date", "Price", "Volume"])
 
-st.info("Fetching live historical data from Binance...")
+st.info("Fetching live historical data from Yahoo Finance...")
 coin_data_dict = {}
 
-# No more aggressive progress bar delays needed! Binance is fast.
 for coin_name in selected_coins:
     symbol = coins_dict.get(coin_name)
     if symbol:
-        coin_data_dict[coin_name] = fetch_binance_history(symbol, timeframe)
+        coin_data_dict[coin_name] = fetch_yf_history(symbol, timeframe)
 
 st.success("Data fetching complete!")
 
-# ---- FEATURE ENGINEERING + ML (Unchanged logic) ----
+# ---- FEATURE ENGINEERING + ML ----
 st.markdown("##  Predictions & Signals (with Volume features)")
 results = []
 all_raw_for_download = {}
@@ -277,3 +278,4 @@ for res in results:
     coin, sig, pred, price = res.get("Coin"), res.get("Signal"), res.get("Predicted Trend"), res.get("Predicted Price")
     if sig == "Buy": st.success(f"{coin}: BUY (Predicted Trend: {pred}, Price: ${price})")
     elif sig == "Sell": st.error(f"{coin}: SELL (Predicted Trend: {pred}, Price: ${price})")
+        
