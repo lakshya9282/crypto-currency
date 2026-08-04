@@ -17,6 +17,7 @@ import plotly.graph_objs as go
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
 import io
+import time
 
 st.set_page_config(page_title="Live Crypto Dashboard", layout="wide")
 st.title("Live Multi-Crypto Dashboard with ML Predictions")
@@ -61,17 +62,23 @@ def fetch_markets(vs_currency="usd", per_page=50, page=1):
         "page": page,
         "price_change_percentage": "24h"
     }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     try:
-        resp = requests.get(url, params=params, timeout=15)
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        if resp.status_code == 429:
+            st.error("CoinGecko API rate limit reached for Markets Data. Please wait a minute and refresh.")
+            return []
         resp.raise_for_status()
         return resp.json()
-    except Exception:
+    except Exception as e:
+        st.error(f"Error fetching market data: {e}")
         return []
 
 markets = fetch_markets(per_page=100, page=1)
 if markets:
     df_markets = pd.DataFrame(markets)
-    # use price_change_percentage_24h (CoinGecko uses that key)
     if "price_change_percentage_24h" in df_markets.columns:
         sorted_by_change = df_markets.sort_values(by="price_change_percentage_24h", ascending=False)
         top_gainers = sorted_by_change.head(5)
@@ -99,18 +106,13 @@ with col2:
     add_gainers = st.button(" Add Gainers to Selection")
     add_losers = st.button(" Add Losers to Selection")
 
-    # Buttons update session state and rerun
     if add_gainers and not top_gainers.empty:
-        # map names back to dictionary keys if possible
         names = []
         for idx, row in top_gainers.iterrows():
-            # try to find key by matching id or name
-            # prefer "Name (SYMBOL)" style if present in coins_dict
             possible_matches = [k for k, v in coins_dict.items() if (v == row.get("id")) or (row.get("name") in k) or (row.get("symbol") and row.get("symbol").upper() in k)]
             if possible_matches:
                 names.append(possible_matches[0])
             else:
-                # fallback: use name alone (won't be recognized by coins_dict later)
                 names.append(row.get("name"))
         st.session_state.selected_coins = names
         st.experimental_rerun()
@@ -152,39 +154,56 @@ if not selected_coins:
 # ---- FETCH HISTORICAL DATA (prices + volumes) ----
 @st.cache_data(ttl=3600)
 def fetch_coin_history(coin_id: str, days: int):
-    """
-    Returns DataFrame with Date, Price, Volume
-    Uses CoinGecko /coins/{id}/market_chart endpoint which returns 'prices' and 'total_volumes'
-    """
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
     params = {"vs_currency": "usd", "days": str(days)}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     try:
-        resp = requests.get(url, params=params, timeout=15)
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        if resp.status_code == 429:
+            st.warning(f"Rate limited while fetching {coin_id}. Waiting 5 seconds...")
+            time.sleep(5) # aggressive wait if limited
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            
         resp.raise_for_status()
         data = resp.json()
         prices = data.get("prices", [])
         volumes = data.get("total_volumes", [])
+        
         if not prices:
             return pd.DataFrame(columns=["Date", "Price", "Volume"])
-        # prices and volumes are lists of [timestamp, value] with same timestamps
+            
         df_prices = pd.DataFrame(prices, columns=["timestamp", "Price"])
         df_vol = pd.DataFrame(volumes, columns=["timestamp_v", "Volume"])
         df = pd.concat([df_prices, df_vol["Volume"]], axis=1)
         df["Date"] = pd.to_datetime(df["timestamp"], unit="ms")
         df = df[["Date", "Price", "Volume"]].reset_index(drop=True)
         return df
-    except Exception:
+    except Exception as e:
+        st.error(f"Failed to fetch history for {coin_id}: {e}")
         return pd.DataFrame(columns=["Date", "Price", "Volume"])
 
 st.info("Fetching live historical data (prices + volumes)...")
 coin_data_dict = {}
-for coin_name in selected_coins:
+
+# Introduce a progress bar to show waiting time between API calls
+progress_text = "Fetching data... Please wait to avoid API limits."
+my_bar = st.progress(0, text=progress_text)
+
+for idx, coin_name in enumerate(selected_coins):
     coin_id = coins_dict.get(coin_name)
     if coin_id is None:
-        # skip unknown coins (maybe added from market list but not in dict)
         coin_data_dict[coin_name] = pd.DataFrame(columns=["Date", "Price", "Volume"])
     else:
         coin_data_dict[coin_name] = fetch_coin_history(coin_id, timeframe)
+        # Sleep to avoid hitting CoinGecko rate limits
+        if idx < len(selected_coins) - 1:
+            time.sleep(1.5) 
+            
+    my_bar.progress((idx + 1) / len(selected_coins), text=progress_text)
+
+my_bar.empty()
 st.success("Live data fetched successfully!")
 
 # ---- FEATURE ENGINEERING + ML ----
@@ -195,9 +214,8 @@ all_predictions_for_download = []
 
 for coin_name, df in coin_data_dict.items():
     raw_df = df.copy()
-    all_raw_for_download[coin_name] = raw_df  # store raw for download
+    all_raw_for_download[coin_name] = raw_df
 
-    # If insufficient historical data, skip ML for that coin
     if df.empty or len(df) < 5:
         results.append({
             "Coin": coin_name,
@@ -211,20 +229,16 @@ for coin_name, df in coin_data_dict.items():
 
     # Feature engineering
     df = df.copy().reset_index(drop=True)
-    # Moving averages with min_periods so small timeframes still work
     df["MA7"] = df["Price"].rolling(window=7, min_periods=1).mean()
     df["MA14"] = df["Price"].rolling(window=14, min_periods=1).mean()
     df["Momentum"] = df["Price"] - df["Price"].shift(1)
     df["Return"] = df["Price"].pct_change().fillna(0)
     df["Volatility"] = df["Return"].rolling(window=7, min_periods=1).std().fillna(0)
-    # Volume-based features
     df["Volume_Change"] = df["Volume"].pct_change().fillna(0)
     df["Volume_Ratio"] = df["Volume"] / (df["Volume"].rolling(window=7, min_periods=1).mean().replace(0, np.nan)).fillna(0)
-    # Target: whether next price is up
     df["Trend"] = (df["Price"].shift(-1) > df["Price"]).astype(int)
     df = df.dropna().reset_index(drop=True)
 
-    # align features and labels (drop last row since it has no next-day label)
     features = ["Price", "MA7", "MA14", "Momentum", "Return", "Volatility", "Volume", "Volume_Change", "Volume_Ratio"]
     X = df[features].iloc[:-1].reset_index(drop=True)
     y_price = df["Price"].shift(-1).iloc[:-1].reset_index(drop=True)
@@ -241,7 +255,6 @@ for coin_name, df in coin_data_dict.items():
         })
         continue
 
-    # Time-ordered train/test split
     test_size = 0.2
     split_idx = max(1, int(len(X) * (1 - test_size)))
     X_train = X.iloc[:split_idx]
@@ -251,12 +264,10 @@ for coin_name, df in coin_data_dict.items():
     y_train_trend = y_trend.iloc[:split_idx]
     y_test_trend = y_trend.iloc[split_idx:]
 
-    # Scale
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Models
     reg = LinearRegression()
     cls = LogisticRegression(solver="liblinear", max_iter=1000)
 
@@ -274,7 +285,6 @@ for coin_name, df in coin_data_dict.items():
         })
         continue
 
-    # Predictions on test
     try:
         y_pred_price = reg.predict(X_test_scaled)
         y_pred_trend = cls.predict(X_test_scaled)
@@ -284,7 +294,6 @@ for coin_name, df in coin_data_dict.items():
         mae = np.nan
         acc = np.nan
 
-    # Next-day prediction using last available X (last row of X_test or X_train if test empty)
     try:
         latest_scaled = X_test_scaled[-1].reshape(1, -1)
     except Exception:
@@ -310,7 +319,6 @@ for coin_name, df in coin_data_dict.items():
         "Accuracy": f"{acc*100:.2f}%" if not np.isnan(acc) else "N/A"
     })
 
-    # store per-coin prediction row for download
     pred_row = {
         "Coin": coin_name,
         "Predicted_Price": pred_price_rounded,
@@ -329,7 +337,6 @@ st.dataframe(results_df)
 # ---- DOWNLOAD BUTTONS ----
 st.markdown("### ⤓ Download Data & Predictions")
 
-# Predictions CSV
 if len(all_predictions_for_download) > 0:
     preds_df = pd.DataFrame(all_predictions_for_download)
     csv = preds_df.to_csv(index=False).encode("utf-8")
@@ -342,7 +349,6 @@ if len(all_predictions_for_download) > 0:
 else:
     st.info("No predictions available for download.")
 
-# Raw data: offer a CSV per coin via a small expander list
 with st.expander("Download raw time series CSVs (per coin)"):
     for coin_name, raw_df in all_raw_for_download.items():
         if raw_df is None or raw_df.empty:
