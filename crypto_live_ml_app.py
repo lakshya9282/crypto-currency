@@ -12,11 +12,9 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
 import plotly.graph_objs as go
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
-import io
 import time
 
 st.set_page_config(page_title="Live Crypto Dashboard", layout="wide")
@@ -49,10 +47,39 @@ coins_dict = {
 if "selected_coins" not in st.session_state:
     st.session_state.selected_coins = ["Bitcoin (BTC)", "Ethereum (ETH)"]
 
+# ---- API HELPER WITH EXPONENTIAL BACKOFF ----
+def fetch_api_with_backoff(url, params, headers, max_retries=3):
+    """Fetches data from an API and handles 429 Rate Limits by waiting and retrying."""
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            
+            # If rate limited, wait and try again
+            if resp.status_code == 429:
+                wait_time = 15 * (attempt + 1) # Wait 15s, then 30s, then 45s
+                st.warning(f"⚠️ API limit reached. Pausing for {wait_time} seconds before retrying...")
+                time.sleep(wait_time)
+                continue
+                
+            resp.raise_for_status()
+            return resp.json()
+            
+        except requests.exceptions.HTTPError as err:
+            # Catch other HTTP errors but don't crash
+            st.error(f"HTTP Error: {err}")
+            return None
+        except Exception as e:
+            st.error(f"Connection Error: {e}")
+            return None
+            
+    st.error("❌ Failed to fetch data after multiple attempts. The API has temporarily blocked your IP.")
+    return None
+
 # ---- TOP GAINERS / LOSERS SECTION ----
 st.markdown("##  Top 5 Gainers & Top 5 Losers (24h)")
 
-@st.cache_data(ttl=300)
+# Increased TTL to 15 minutes (900s) to heavily reduce API calls
+@st.cache_data(ttl=900)
 def fetch_markets(vs_currency="usd", per_page=50, page=1):
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {
@@ -65,18 +92,10 @@ def fetch_markets(vs_currency="usd", per_page=50, page=1):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
-        if resp.status_code == 429:
-            st.error("CoinGecko API rate limit reached for Markets Data. Please wait a minute and refresh.")
-            return []
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        st.error(f"Error fetching market data: {e}")
-        return []
+    return fetch_api_with_backoff(url, params, headers)
 
 markets = fetch_markets(per_page=100, page=1)
+
 if markets:
     df_markets = pd.DataFrame(markets)
     if "price_change_percentage_24h" in df_markets.columns:
@@ -99,7 +118,7 @@ with col1:
             "price_change_percentage_24h": "24h %", "total_volume": "24h Volume"
         }).reset_index(drop=True))
     else:
-        st.info("Market data unavailable.")
+        st.info("Market data unavailable due to API limits. Try again later.")
 
 with col2:
     st.write("")  # spacer
@@ -136,12 +155,12 @@ with col3:
             "price_change_percentage_24h": "24h %", "total_volume": "24h Volume"
         }).reset_index(drop=True))
     else:
-        st.info("Market data unavailable.")
+        st.info("Market data unavailable due to API limits. Try again later.")
 
 # ---- USER INPUT: MULTISELECT ----
 st.markdown("---")
 selected_coins = st.multiselect(
-    "Select Cryptocurrencies:",
+    "Select Cryptocurrencies (Keep to 1-3 to avoid API limits):",
     list(coins_dict.keys()),
     default=st.session_state.selected_coins
 )
@@ -152,6 +171,7 @@ if not selected_coins:
     st.stop()
 
 # ---- FETCH HISTORICAL DATA (prices + volumes) ----
+# Increased TTL to 1 hour to save API calls when tweaking dashboard logic
 @st.cache_data(ttl=3600)
 def fetch_coin_history(coin_id: str, days: int):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
@@ -159,36 +179,29 @@ def fetch_coin_history(coin_id: str, days: int):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
-        if resp.status_code == 429:
-            st.warning(f"Rate limited while fetching {coin_id}. Waiting 5 seconds...")
-            time.sleep(5) # aggressive wait if limited
-            resp = requests.get(url, params=params, headers=headers, timeout=15)
-            
-        resp.raise_for_status()
-        data = resp.json()
-        prices = data.get("prices", [])
-        volumes = data.get("total_volumes", [])
-        
-        if not prices:
-            return pd.DataFrame(columns=["Date", "Price", "Volume"])
-            
-        df_prices = pd.DataFrame(prices, columns=["timestamp", "Price"])
-        df_vol = pd.DataFrame(volumes, columns=["timestamp_v", "Volume"])
-        df = pd.concat([df_prices, df_vol["Volume"]], axis=1)
-        df["Date"] = pd.to_datetime(df["timestamp"], unit="ms")
-        df = df[["Date", "Price", "Volume"]].reset_index(drop=True)
-        return df
-    except Exception as e:
-        st.error(f"Failed to fetch history for {coin_id}: {e}")
+    
+    data = fetch_api_with_backoff(url, params, headers)
+    
+    if data is None:
         return pd.DataFrame(columns=["Date", "Price", "Volume"])
+        
+    prices = data.get("prices", [])
+    volumes = data.get("total_volumes", [])
+    
+    if not prices:
+        return pd.DataFrame(columns=["Date", "Price", "Volume"])
+        
+    df_prices = pd.DataFrame(prices, columns=["timestamp", "Price"])
+    df_vol = pd.DataFrame(volumes, columns=["timestamp_v", "Volume"])
+    df = pd.concat([df_prices, df_vol["Volume"]], axis=1)
+    df["Date"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df = df[["Date", "Price", "Volume"]].reset_index(drop=True)
+    return df
 
 st.info("Fetching live historical data (prices + volumes)...")
 coin_data_dict = {}
 
-# Introduce a progress bar to show waiting time between API calls
-progress_text = "Fetching data... Please wait to avoid API limits."
+progress_text = "Fetching data... (Throttling API calls to prevent bans)"
 my_bar = st.progress(0, text=progress_text)
 
 for idx, coin_name in enumerate(selected_coins):
@@ -197,14 +210,14 @@ for idx, coin_name in enumerate(selected_coins):
         coin_data_dict[coin_name] = pd.DataFrame(columns=["Date", "Price", "Volume"])
     else:
         coin_data_dict[coin_name] = fetch_coin_history(coin_id, timeframe)
-        # Sleep to avoid hitting CoinGecko rate limits
+        # Sleep safely between calls to respect the free tier rate limits
         if idx < len(selected_coins) - 1:
-            time.sleep(1.5) 
+            time.sleep(3.5) 
             
     my_bar.progress((idx + 1) / len(selected_coins), text=progress_text)
 
 my_bar.empty()
-st.success("Live data fetched successfully!")
+st.success("Data fetching complete!")
 
 # ---- FEATURE ENGINEERING + ML ----
 st.markdown("##  Predictions & Signals (with Volume features)")
@@ -219,7 +232,7 @@ for coin_name, df in coin_data_dict.items():
     if df.empty or len(df) < 5:
         results.append({
             "Coin": coin_name,
-            "Predicted Price": "Insufficient data",
+            "Predicted Price": "API Blocked / No Data",
             "Predicted Trend": "N/A",
             "Signal": "N/A",
             "MAE": "N/A",
@@ -390,7 +403,7 @@ for res in results:
 # ---- FOOTER NOTES ----
 st.markdown("---")
 st.markdown(
-    "Notes: This dashboard uses CoinGecko public APIs (no API key). Predictions are simple ML baselines "
-    "(Linear Regression and Logistic Regression) using engineered price & volume features. "
+    "Notes: This dashboard uses CoinGecko public APIs (no API key). Free API tier requires rate limit pacing. "
+    "Predictions are simple ML baselines (Linear Regression and Logistic Regression) using engineered price & volume features. "
     "For better performance consider time-series models (ARIMA, Prophet, LSTM) and more data/features."
 )
