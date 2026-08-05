@@ -49,7 +49,7 @@ if "selected_coins" not in st.session_state:
     st.session_state.selected_coins = ["Bitcoin (BTC)", "Ethereum (ETH)"]
 
 # ---- TOP GAINERS / LOSERS SECTION (YAHOO FINANCE) ----
-st.markdown("##  Top 5 Gainers & Top 5 Losers (24h)")
+st.markdown("## Top 5 Gainers & Top 5 Losers (24h)")
 st.caption("Calculated from your tracked portfolio list below.")
 
 @st.cache_data(ttl=300) # Cache for 5 minutes
@@ -99,7 +99,7 @@ def format_market_table(df):
     }, inplace=True)
     return display_df.reset_index(drop=True)
 
-col1, col2, col3 = st.columns([3, 1, 3])
+col1, col2 = st.columns(2)
 with col1:
     st.subheader("Top 5 Gainers")
     if not top_gainers.empty:
@@ -108,15 +108,6 @@ with col1:
         st.info("Market data unavailable.")
 
 with col2:
-    st.write("") 
-    if st.button(" Add Gainers"):
-        st.session_state.selected_coins = top_gainers["name"].tolist()
-        st.experimental_rerun()
-    if st.button(" Add Losers"):
-        st.session_state.selected_coins = top_losers["name"].tolist()
-        st.experimental_rerun()
-
-with col3:
     st.subheader("Top 5 Losers")
     if not top_losers.empty:
         st.table(format_market_table(top_losers))
@@ -175,7 +166,7 @@ for coin_name in selected_coins:
 st.success("Data fetching complete!")
 
 # ---- FEATURE ENGINEERING + ML ----
-st.markdown("##  Predictions & Signals (with Volume features)")
+st.markdown("## Predictions & Signals (with Volume features)")
 results = []
 all_raw_for_download = {}
 all_predictions_for_download = []
@@ -262,6 +253,34 @@ for coin_name, df in coin_data_dict.items():
 
 st.dataframe(pd.DataFrame(results))
 
+# ---- DOWNLOAD BUTTONS ----
+st.markdown("### ⤓ Download Data & Predictions")
+
+if len(all_predictions_for_download) > 0:
+    preds_df = pd.DataFrame(all_predictions_for_download)
+    csv = preds_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Download Predictions (CSV)",
+        data=csv,
+        file_name=f"crypto_predictions_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+else:
+    st.info("No predictions available for download.")
+
+with st.expander("Download raw time series CSVs (per coin)"):
+    for coin_name, raw_df in all_raw_for_download.items():
+        if raw_df is None or raw_df.empty:
+            st.write(f"{coin_name}: No data")
+            continue
+        csv_bytes = raw_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label=f"Download {coin_name} raw CSV",
+            data=csv_bytes,
+            file_name=f"{coin_name.replace(' ', '_')}_raw_{timeframe}d.csv",
+            mime="text/csv"
+        )
+
 # ---- MULTI-COIN INTERACTIVE CHART ----
 st.markdown("## 📈 Price Chart")
 fig = go.Figure()
@@ -278,4 +297,11 @@ for res in results:
     coin, sig, pred, price = res.get("Coin"), res.get("Signal"), res.get("Predicted Trend"), res.get("Predicted Price")
     if sig == "Buy": st.success(f"{coin}: BUY (Predicted Trend: {pred}, Price: ${price})")
     elif sig == "Sell": st.error(f"{coin}: SELL (Predicted Trend: {pred}, Price: ${price})")
-        
+
+# ---- FOOTER NOTES ----
+st.markdown("---")
+st.markdown(
+    "Notes: This dashboard uses Yahoo Finance public APIs (no API key). "
+    "Predictions are simple ML baselines (Linear Regression and Logistic Regression) using engineered price & volume features. "
+    "For better performance consider time-series models (ARIMA, Prophet, LSTM) and more data/features."
+)
