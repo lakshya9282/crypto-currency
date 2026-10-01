@@ -15,7 +15,13 @@ from sklearn.preprocessing import StandardScaler
 import plotly.graph_objs as go
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime
+from flask import Flask
 
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Hello World"
 st.set_page_config(page_title="Live Crypto Dashboard", layout="wide")
 st.title("Live Multi-Crypto Dashboard with ML Predictions")
 st.markdown("Real-time cryptocurrency prices with next-day trend & price predictions. Powered by **Yahoo Finance** for unrestricted, fast data.")
